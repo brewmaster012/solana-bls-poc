@@ -83,6 +83,7 @@ static PKY1: [u8; 32] = [
 
 // verify signature: compariing the pairings: E(sig, pk) ==? E(hash, G2)
 // all slice must be of size 32
+// NOTE: this function can panic if input parameters are not correct (e.g. not on curve)
 fn verify(
     sigx: &[u8],
     sigy: &[u8],
@@ -112,37 +113,49 @@ fn verify(
 }
 
 // hash_to_g1_point hashes a message to a G1 point
-// first it uses keccak256 to hash the message into 32 bytes, interpreted as a big integer in BE as x,
+// first it uses keccak256 to hash the msg into 32 bytes, interpreted as a big integer in BE as x,
 // then it calculates y^2 = x^3 + 3, doing a custom sqrt; compute y if it exists
 // there is 50% chance that no such y exists, in that case we increment x and try again.
-// Keep incrementing x until a suitable (x,y) pair is found to satisfy y^2 = x^3 + 3
+// Keep incrementing x until a suitable (x,y) pair is found to satisfy y^2 = x^3 + 3 (on the curve)
 // and return (x,y) as a G1 point (the hased point)
-// this could take as many as 20 tries; but should take 2 tries on average.
-pub fn hash_to_g1_point(msg: &[u8]) -> G1Affine {
+// this could take as many as 16 tries; but should take 2 tries on average.
+pub fn hash_to_g1_point(msg: &[u8]) -> Option<G1Affine> {
     let three = Fq::from(3u64);
-
+    let one = Fq::one();
     let mut hasher = Keccak::v256();
     hasher.update(msg);
     let mut hashed_result = [0u8; 32];
     hasher.finalize(&mut hashed_result);
     let big_int = BigUint::from_bytes_be(&hashed_result);
 
-    let x = fq_from_big_uint(big_int);
+    let mut x = fq_from_big_uint(big_int);
     let mut y = x;
     y.square_in_place();
     y *= x;
     y += three;
 
-    let p = BigUint::from_bytes_be(&P_BYTES);
-    let y_bytes = y.into_bigint().to_bytes_be();
+    let mut iter = 0;
+    loop {
+        iter += 1;
+        // sqrt(y) -- if sqrt of y exists, then it must be y^((p+1)/4) mod p
+        // according to fermat's little theorem; compute and check.
+        let p = BigUint::from_bytes_be(&P_BYTES);
+        let y_bytes = y.into_bigint().to_bytes_be();
 
-    let y2_bytes = big_mod_exp(y_bytes.as_slice(), Q_BYTES.as_slice(), p.to_bytes_be().as_slice());
-    let y2 = BigUint::from_bytes_be(&y2_bytes);
-    let y2_fq = fq_from_big_uint(y2);
-    let y22 = y2_fq.square();
-    assert!(y22 == y, "sqrt failed");
-    let hash_point = G1Projective::new(x, y2_fq, Fq::one()).into_affine();
-    hash_point
+        let y2_bytes = big_mod_exp(y_bytes.as_slice(), Q_BYTES.as_slice(), p.to_bytes_be().as_slice());
+        let y2 = BigUint::from_bytes_be(&y2_bytes);
+        let y2_fq = fq_from_big_uint(y2);
+        let y22 = y2_fq.square();
+        if y22 == y {
+            let hash_point = G1Projective::new(x, y2_fq, Fq::one()).into_affine();
+            return Some(hash_point);
+        }
+        if iter > 20 {
+            return None;
+        }
+        // increment x and try again
+        x += one;
+    }
 }
 
 #[program]
@@ -160,7 +173,7 @@ pub mod solanabls {
         let three = Fq::from(3u64);
 
         let message = "Hello BLS".as_bytes();
-        let hash_point = hash_to_g1_point(&message);
+        let hash_point = hash_to_g1_point(&message).unwrap();
 
         // now sign: secretkey * message hash
         let sk_int = BigUint::from_bytes_be(&SK_BYTES);
