@@ -81,6 +81,26 @@ static PKY1: [u8; 32] = [
     0x58, 0x35, 0x11, 0x53, 0xec, 0x22, 0xc4, 0x0c, 0x39, 0x71, 0xa4, 0x87, 0xd7,
 ];
 
+// keysign a BLS signature on BN254 curve;
+// sk: secret key as 32 bytes slice in big-endian
+// hashx, hashy: the msg hash point on G1, both 32 bytes slice in big-endian
+// NOTE: this function can panic if input parameters are not correct (e.g. not on curve)
+fn sign(sk: &[u8], hashx: &[u8], hashy: &[u8]) -> Vec<u8> {
+    let sk_int = BigUint::from_bytes_be(&sk);
+    // alt_bn128_multiplication input is 96 bytes
+    // fill the first 32 bytes of input with the hash_point.x in big endian
+    // fill the second 32 bytes of input with the hash_point.y in big endian
+    // fill the third 32 bytes of input with the sk_int in big endian
+    let sk_bytes = sk_int.to_bytes_be();
+    let mut input = [0u8; 96];
+    input[..32].copy_from_slice(hashx);
+    input[32..64].copy_from_slice(hashy);
+    input[64..96].copy_from_slice(&sk_bytes);
+
+    let sig = alt_bn128_multiplication(input.as_slice()).unwrap();
+    sig
+}
+
 // verify signature: compariing the pairings: E(sig, pk) ==? E(hash, G2)
 // all slice must be of size 32
 // NOTE: this function can panic if input parameters are not correct (e.g. not on curve)
@@ -170,27 +190,11 @@ pub mod solanabls {
     // and benchmarking for CU cost
     // Keep it here for reference only
     pub fn compute(ctx: Context<Compute>) -> Result<()> {
-        let three = Fq::from(3u64);
-
         let message = "Hello BLS".as_bytes();
         let hash_point = hash_to_g1_point(&message).unwrap();
-
-        // now sign: secretkey * message hash
-        let sk_int = BigUint::from_bytes_be(&SK_BYTES);
-        // alt_bn128_multiplication input is 96 bytes
-        // fill the first 32 bytes of input with the hash_point.x in big endian
-        // fill the second 32 bytes of input with the hash_point.y in big endian
-        // fill the third 32 bytes of input with the sk_int in big endian
         let x_bytes = hash_point.x.into_bigint().to_bytes_be();
         let y_bytes = hash_point.y.into_bigint().to_bytes_be();
-        let sk_bytes = sk_int.to_bytes_be();
-        let mut input = [0u8; 96];
-        for i in 0..32 {
-            input[i] = x_bytes[i];
-            input[i + 32] = y_bytes[i];
-            input[i + 64] = sk_bytes[i];
-        }
-        let sig = alt_bn128_multiplication(input.as_slice()).unwrap();
+        let sig = sign(&SK_BYTES, &x_bytes, &y_bytes);
 
         // verify signature: compariing the pairings: E(sig, pk) ==? E(hash, G2)
         let res = verify(&sig[..32], &sig[32..64], &PKX0, &PKX1, &PKY0, &PKY1, &x_bytes, &y_bytes);
