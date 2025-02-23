@@ -173,8 +173,8 @@ pub fn hash_to_g1_point(msg: &[u8]) -> Option<G1Affine> {
         if iter > 20 {
             return None;
         }
-        // increment x and try again
-        x += one;
+        // sqrt(y) does not exist; try sqrt(y+1) next iteration
+        y += one;
     }
 }
 
