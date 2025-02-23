@@ -18,7 +18,7 @@ describe("solanabls", () => {
 
   it("Compute", async () => {
     const tx = await program.methods
-      .compute(new anchor.BN(40))
+      .compute()
       .preInstructions([
         ComputeBudgetProgram.setComputeUnitLimit({ units: 10_000_000 }),
       ])
