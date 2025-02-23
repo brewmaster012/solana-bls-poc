@@ -1,6 +1,6 @@
 use anchor_lang::prelude::*;
 
-use ark_bn254::{Fq, G1Projective};
+use ark_bn254::{Fq, G1Affine, G1Projective};
 use ark_ec::CurveGroup;
 use ark_ff::{BigInteger, Field, PrimeField};
 use ark_std::One;
@@ -11,7 +11,7 @@ use tiny_keccak::{Hasher, Keccak};
 
 declare_id!("55q9EhHs3kVsH3dZKbBojec9ao1kJb56g1D7jLoNyCEp");
 
-fn FqFromBigUint(n: BigUint) -> Fq {
+fn fq_from_big_uint(n: BigUint) -> Fq {
     let mut bytes = [0u8; 32];
     n.to_bytes_be()
         .iter()
@@ -53,6 +53,34 @@ static nG2y0: [u8; 32] = [
     0x28, 0x5c, 0x2d, 0xf7, 0x11, 0xef, 0x39, 0xc0, 0x15, 0x71, 0x82, 0x7f, 0x9d,
 ];
 
+// test vectors
+static SK_BYTES: [u8; 32] = [
+    0x0c, 0x3b, 0x68, 0x7e, 0xa7, 0x1d, 0x49, 0x85, 0x84, 0xcb, 0x64, 0x01, 0x6a, 0x56, 0x47, 0xcd, 0x95, 0x6f, 0xa1,
+    0x2c, 0xc0, 0x6c, 0x24, 0x01, 0xcf, 0xf1, 0xbc, 0xee, 0xd8, 0x6f, 0xb0, 0xf6,
+];
+// "8378816085881533471915855765377395720650519250900991714910570838142371337484",
+static PKX0: [u8; 32] = [
+    0x12, 0x86, 0x3d, 0xe9, 0x9c, 0xc0, 0x03, 0x7a, 0xc6, 0xd0, 0x04, 0x0c, 0x76, 0xb7, 0x07, 0x02, 0x73, 0x9e, 0x01,
+    0xd4, 0xd7, 0x38, 0x93, 0xed, 0x9f, 0xfc, 0xbf, 0x6a, 0x6b, 0x01, 0x95, 0x0c,
+];
+
+// "12790415566273137204438980474676206431551668194861774000289116208318672938344",
+static PKX1: [u8; 32] = [
+    0x1c, 0x47, 0x1e, 0x60, 0xe1, 0xf7, 0x9d, 0xe8, 0x49, 0xd0, 0xb1, 0xe0, 0x0c, 0x3e, 0xc2, 0xeb, 0x52, 0x5b, 0xd5,
+    0xa5, 0x38, 0x64, 0x70, 0x16, 0x3d, 0x0d, 0xcd, 0x83, 0x28, 0x56, 0x25, 0x68,
+];
+
+// "19990703290207056186001361313522144773565207870437521135189959374985874088302",
+static PKY0: [u8; 32] = [
+    0x2c, 0x32, 0x56, 0x4c, 0x01, 0x8b, 0x5e, 0x59, 0x86, 0x17, 0x56, 0x5d, 0xa8, 0x28, 0x55, 0xa1, 0x43, 0x92, 0xa6,
+    0x01, 0x45, 0x1c, 0xbd, 0x12, 0xd9, 0x04, 0xc6, 0x02, 0xa3, 0x9f, 0xa1, 0x6e,
+];
+// "4358342334887501838847343362140356079440147357795966237968340896425437333463",
+static PKY1: [u8; 32] = [
+    0x09, 0xa2, 0xbb, 0xfd, 0xf4, 0x23, 0x20, 0x70, 0x14, 0x4a, 0x06, 0x04, 0xf2, 0x4a, 0x15, 0xb2, 0xd0, 0xe5, 0xaa,
+    0x58, 0x35, 0x11, 0x53, 0xec, 0x22, 0xc4, 0x0c, 0x39, 0x71, 0xa4, 0x87, 0xd7,
+];
+
 // verify signature: compariing the pairings: E(sig, pk) ==? E(hash, G2)
 // all slice must be of size 32
 fn verify(
@@ -65,6 +93,7 @@ fn verify(
     hashx: &[u8],
     hashy: &[u8],
 ) -> bool {
+    // TODO: return false if any of the input is not 32 bytes slice
     let mut input2 = [0u8; 384];
     input2[0..32].copy_from_slice(&sigx);
     input2[32..64].copy_from_slice(&sigy);
@@ -82,35 +111,43 @@ fn verify(
     res[31] == 1
 }
 
+// hash_to_g1_point hashes a message to a G1 point
+// first it uses keccak256 to hash the message into 32 bytes, interpreted as a big integer in BE as x,
+// then it calculates y^2 = x^3 + 3, doing a custom sqrt; compute y if it exists
+// there is 50% chance that no such y exists, in that case we increment x and try again.
+// Keep incrementing x until a suitable (x,y) pair is found to satisfy y^2 = x^3 + 3
+// and return (x,y) as a G1 point (the hased point)
+// this could take as many as 20 tries; but should take 2 tries on average.
+pub fn hash_to_g1_point(msg: &[u8]) -> G1Affine {
+    let three = Fq::from(3u64);
+
+    let mut hasher = Keccak::v256();
+    hasher.update(msg);
+    let mut hashed_result = [0u8; 32];
+    hasher.finalize(&mut hashed_result);
+    let big_int = BigUint::from_bytes_be(&hashed_result);
+
+    let x = fq_from_big_uint(big_int);
+    let mut y = x;
+    y.square_in_place();
+    y *= x;
+    y += three;
+
+    let p = BigUint::from_bytes_be(&P_BYTES);
+    let y_bytes = y.into_bigint().to_bytes_be();
+
+    let y2_bytes = big_mod_exp(y_bytes.as_slice(), Q_BYTES.as_slice(), p.to_bytes_be().as_slice());
+    let y2 = BigUint::from_bytes_be(&y2_bytes);
+    let y2_fq = fq_from_big_uint(y2);
+    let y22 = y2_fq.square();
+    assert!(y22 == y, "sqrt failed");
+    let hash_point = G1Projective::new(x, y2_fq, Fq::one()).into_affine();
+    hash_point
+}
+
 #[program]
 pub mod solanabls {
     use super::*;
-    static SK_BYTES: [u8; 32] = [
-        0x0c, 0x3b, 0x68, 0x7e, 0xa7, 0x1d, 0x49, 0x85, 0x84, 0xcb, 0x64, 0x01, 0x6a, 0x56, 0x47, 0xcd, 0x95, 0x6f,
-        0xa1, 0x2c, 0xc0, 0x6c, 0x24, 0x01, 0xcf, 0xf1, 0xbc, 0xee, 0xd8, 0x6f, 0xb0, 0xf6,
-    ];
-    // "8378816085881533471915855765377395720650519250900991714910570838142371337484",
-    static PKX0: [u8; 32] = [
-        0x12, 0x86, 0x3d, 0xe9, 0x9c, 0xc0, 0x03, 0x7a, 0xc6, 0xd0, 0x04, 0x0c, 0x76, 0xb7, 0x07, 0x02, 0x73, 0x9e,
-        0x01, 0xd4, 0xd7, 0x38, 0x93, 0xed, 0x9f, 0xfc, 0xbf, 0x6a, 0x6b, 0x01, 0x95, 0x0c,
-    ];
-
-    // "12790415566273137204438980474676206431551668194861774000289116208318672938344",
-    static PKX1: [u8; 32] = [
-        0x1c, 0x47, 0x1e, 0x60, 0xe1, 0xf7, 0x9d, 0xe8, 0x49, 0xd0, 0xb1, 0xe0, 0x0c, 0x3e, 0xc2, 0xeb, 0x52, 0x5b,
-        0xd5, 0xa5, 0x38, 0x64, 0x70, 0x16, 0x3d, 0x0d, 0xcd, 0x83, 0x28, 0x56, 0x25, 0x68,
-    ];
-
-    // "19990703290207056186001361313522144773565207870437521135189959374985874088302",
-    static PKY0: [u8; 32] = [
-        0x2c, 0x32, 0x56, 0x4c, 0x01, 0x8b, 0x5e, 0x59, 0x86, 0x17, 0x56, 0x5d, 0xa8, 0x28, 0x55, 0xa1, 0x43, 0x92,
-        0xa6, 0x01, 0x45, 0x1c, 0xbd, 0x12, 0xd9, 0x04, 0xc6, 0x02, 0xa3, 0x9f, 0xa1, 0x6e,
-    ];
-    // "4358342334887501838847343362140356079440147357795966237968340896425437333463",
-    static PKY1: [u8; 32] = [
-        0x09, 0xa2, 0xbb, 0xfd, 0xf4, 0x23, 0x20, 0x70, 0x14, 0x4a, 0x06, 0x04, 0xf2, 0x4a, 0x15, 0xb2, 0xd0, 0xe5,
-        0xaa, 0x58, 0x35, 0x11, 0x53, 0xec, 0x22, 0xc4, 0x0c, 0x39, 0x71, 0xa4, 0x87, 0xd7,
-    ];
 
     pub fn initialize(ctx: Context<Initialize>) -> Result<()> {
         Ok(())
@@ -123,27 +160,7 @@ pub mod solanabls {
         let three = Fq::from(3u64);
 
         let message = "Hello BLS".as_bytes();
-        let mut hasher = Keccak::v256();
-        hasher.update(message);
-        let mut hashed_result = [0u8; 32];
-        hasher.finalize(&mut hashed_result);
-        let big_int = BigUint::from_bytes_be(&hashed_result);
-
-        let x = FqFromBigUint(big_int);
-        let mut y = x;
-        y.square_in_place();
-        y *= x;
-        y += three;
-
-        let p = BigUint::from_bytes_be(&P_BYTES);
-        let y_bytes = y.into_bigint().to_bytes_be();
-
-        let y2_bytes = big_mod_exp(y_bytes.as_slice(), Q_BYTES.as_slice(), p.to_bytes_be().as_slice());
-        let y2 = BigUint::from_bytes_be(&y2_bytes);
-        let y2Fq = FqFromBigUint(y2);
-        let y22 = y2Fq.square();
-        assert!(y22 == y, "sqrt failed");
-        let hash_point = G1Projective::new(x, y2Fq, Fq::one()).into_affine();
+        let hash_point = hash_to_g1_point(&message);
 
         // now sign: secretkey * message hash
         let sk_int = BigUint::from_bytes_be(&SK_BYTES);
