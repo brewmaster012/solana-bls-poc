@@ -149,14 +149,15 @@ pub fn hash_to_g1_point(msg: &[u8]) -> Option<G1Affine> {
     let big_int = BigUint::from_bytes_be(&hashed_result);
 
     let mut x = fq_from_big_uint(big_int);
-    let mut y = x;
-    y.square_in_place();
-    y *= x;
-    y += three;
 
     let mut iter = 0;
     loop {
         iter += 1;
+        let mut y = x;
+        y.square_in_place();
+        y *= x;
+        y += three;
+
         // sqrt(y) -- if sqrt of y exists, then it must be y^((p+1)/4) mod p
         // according to fermat's little theorem; compute and check.
         let p = BigUint::from_bytes_be(&P_BYTES);
@@ -174,7 +175,7 @@ pub fn hash_to_g1_point(msg: &[u8]) -> Option<G1Affine> {
             return None;
         }
         // sqrt(y) does not exist; try sqrt(y+1) next iteration
-        y += one;
+        x += one;
     }
 }
 
